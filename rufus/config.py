@@ -1,0 +1,1 @@
+CRAWLING_DEPTH = 1
