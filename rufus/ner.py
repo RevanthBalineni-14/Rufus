@@ -1,17 +1,9 @@
-import spacy
+from keybert import KeyBERT
 
-nlp = spacy.load("en_core_web_sm")
+kw_model = KeyBERT()
 
 def extract_keywords_from_prompt(prompt):
-    doc = nlp(prompt)
-    # print(doc.ents)
-    keywords = set() 
-
-    for ent in doc.ents:
-        keywords.add(ent.text)
-
-    for token in doc:
-        if token.pos_ in {"NOUN", "PROPN"} and not token.is_stop:
-            keywords.add(token.text)
-
-    return list(keywords)
+    keywords = kw_model.extract_keywords(
+        prompt, keyphrase_ngram_range=(1, 3), stop_words='english'
+    )
+    return [kw[0] for kw in keywords]

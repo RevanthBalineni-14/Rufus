@@ -1,12 +1,13 @@
 from nltk.tokenize import sent_tokenize
-from bs4 import BeautifulSoup
-import requests
 import nltk
-from bs4 import BeautifulSoup
-from transformers import pipeline
+from transformers import BartTokenizer, BartForConditionalGeneration
 from tqdm import tqdm
+import trafilatura
+
 nltk.download('punkt')
-nltk.download('punkt_tab')
+
+tokenizer = BartTokenizer.from_pretrained('facebook/bart-large-cnn')
+model = BartForConditionalGeneration.from_pretrained('facebook/bart-large-cnn')
 
 ABBREVIATION_MAP = {
     "HR": "Human Resources",
@@ -14,58 +15,75 @@ ABBREVIATION_MAP = {
     "ML": "Machine Learning"
 }
 
+def extract_main_content(html_content):
+    """Extracts main readable content from HTML using Trafilatura."""
+    return trafilatura.extract(html_content) or ''
+
 def expand_keywords_in_prompt(prompt):
+    """Expands common abbreviations in the prompt to improve keyword extraction."""
     words = prompt.split()
-    expanded_words = [ABBREVIATION_MAP.get(word, word) for word in words]
-    return " ".join(expanded_words)
+    return " ".join(ABBREVIATION_MAP.get(word, word) for word in words)
 
-def extract_relevant_sentences(text, keywords):
+def split_text(text, max_chunk_size=1024):
+    """Splits large text into smaller chunks suitable for the summarization model."""
     sentences = sent_tokenize(text)
-    return [s for s in sentences if any(k.lower() in s.lower() for k in keywords)]
+    chunks, current_chunk = [], ''
 
+    for sentence in sentences:
+        if len(tokenizer.encode(current_chunk + ' ' + sentence)) < max_chunk_size:
+            current_chunk += ' ' + sentence
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
 
-def extract_relevant_links(page_html, keywords, base_url):
-    soup = BeautifulSoup(page_html, 'html.parser')
-    relevant_links = []
+    if current_chunk:
+        chunks.append(current_chunk.strip())
 
-    for link in soup.find_all('a', href=True):
-        anchor_text = link.get_text().strip()
-        href = link['href']
+    return chunks
 
-        if any(keyword.lower() in anchor_text.lower() or keyword.lower() in href.lower() for keyword in keywords):
-            full_url = requests.compat.urljoin(base_url, href)
-            relevant_links.append(full_url)
+def clip_query_from_summary(summary):
+    """
+    Removes the part of the summary that contains the query or any sentence up to the first question mark.
+    """
+    # Check if the query or a question-like part exists in the summary
+    if '?' in summary:
+        # Split the summary at the first question mark and return the rest
+        clipped_summary = summary.split('?', 1)[-1].strip()
+        return clipped_summary
+    return summary.strip()
 
-    return relevant_links
+def generate_cohesive_summary(query, text):
+    """
+    Generates a query-aware, cohesive summary from the extracted content.
+    Properly truncates input to fit within the model's limits.
+    """
+    # Step 1: Split the text into manageable chunks
+    max_input_length = 1024  # BART's maximum token length
+    chunks = split_text(text, max_chunk_size=max_input_length)
+    combined_summary = ""
 
-def clean_html(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    text_elements = soup.find_all(['p', 'h1', 'h2', 'li'])
-    cleaned_text = "\n".join(element.get_text(separator=" ", strip=True) for element in text_elements)
+    # Step 2: Generate summaries for each chunk, guided by the query
+    for chunk in tqdm(chunks, desc="Generating Summary", unit="chunk"):
+        # Combine query with the content for query-driven summarization
+        input_text = f"Answer the question: {query}\nContent: {chunk}"
 
-    return cleaned_text
+        # Truncate input to fit model limits
+        inputs = tokenizer.encode(input_text, return_tensors='pt', truncation=True, max_length=max_input_length)
 
-
-def split_text(text, max_chunk_size=300):
-    words = text.split()
-    return [' '.join(words[i:i + max_chunk_size]) for i in range(0, len(words), max_chunk_size)]
-
-def summarize_text(text, max_length=150, min_length=50):
-    try:
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn", framework="tf")
-    except Exception as e:
-        print(f"Error initializing summarizer: {e}")
-        return "Failed to initialize summarizer."
-
-    chunks = split_text(text)
-    summaries = []
-
-    print(f"Summarizing {len(chunks)} chunks...")
-    for chunk in tqdm(chunks, desc="Summarizing", unit="chunk"):
         try:
-            summary = summarizer(chunk, max_length=max_length, min_length=min_length, do_sample=False)[0]['summary_text']
-            summaries.append(summary)
+            # Generate query-specific summary with beam search for coherence
+            summary_ids = model.generate(
+                inputs,
+                max_length=200,  # Length of each summary section
+                min_length=50,   # Ensure detailed output
+                num_beams=5,     # More beams for better coherence
+                early_stopping=True
+            )
+            # Decode and add the summary to the final output
+            summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+            combined_summary += clip_query_from_summary(summary.strip()) + " "
         except Exception as e:
-            print(f"Error summarizing chunk: {e}")
+            print(f"Error generating summary: {e}. Skipping this chunk.")
 
-    return " ".join(summaries)
+    # Step 3: Return the cohesive, query-specific summary
+    return combined_summary.strip()
