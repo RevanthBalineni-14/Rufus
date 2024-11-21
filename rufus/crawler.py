@@ -16,7 +16,7 @@ def compute_relevance(text, keywords_embedding):
     cosine_scores = util.cos_sim(keywords_embedding, text_embedding)
     return cosine_scores.item()
 
-def fetch_page_content(url, driver, timeout=30):
+def fetch_page_content(url, driver, timeout=2):
     """
     Fetches the page content using Selenium, with timeout handling.
     """
